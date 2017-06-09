@@ -1,0 +1,139 @@
+{{$input := .}}
+
+groups: []
+
+resource_types:
+- name: pivnet
+  type: docker-image
+  source:
+    repository: pivotalcf/pivnet-resource
+    tag: latest-final
+
+resources:
+- name: pcf-pipelines-tarball
+  type: pivnet
+  source:
+    api_token: {{.Config.PivnetToken}}
+    product_slug: pcf-automation
+    # product_version: v0.5.0
+
+- name: tool-om
+  type: github-release
+  source:
+    user: pivotal-cf
+    repository: om
+    access_token: {{.Config.GithubToken}}
+
+{{ range .Products }}
+- name: {{.Name}}
+  type: pivnet
+  check_every: {{$input.Config.PollInterval}}
+  source:
+    api_token: {{$input.Config.PivnetToken}}
+    product_slug: {{.ProductSlug}}
+    product_version: {{.Version}}
+    sort_by: semver
+{{ end }}
+
+- name: stemcell-downloader
+  type: github-release
+  source:
+    user: pivotal-cf
+    repository: pcf-product-stemcell-downloader
+    access_token: {{.Config.GithubToken}}
+    globs:
+    - stemcell-downloader-linux
+
+- name: schedule
+  type: time
+  source:
+    interval: 30m
+    start: "12:00 AM"
+    stop: "11:59 PM"
+    location: America/Los_Angeles
+    days: [Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday]
+
+jobs:
+- name: regulator
+  plan:
+  - get: schedule
+    trigger: true
+  {{ range .Products }}
+  - get: {{.Name}}
+    params: { globs: [] }
+  {{ end }}
+{{ range .Products }}
+- name: upgrade-tile-{{.Name}}
+  plan:
+  - aggregate:
+    - do:
+      - get: pcf-pipelines-tarball
+      - task: unpack-tarball
+        <<: *unpack_tarball_config
+    - get: pivnet-product
+      resource: {{.Name}}
+      passed: [regulator]
+      trigger: true 
+      params:
+        globs:
+        - "*pivotal"
+    - get: tool-om
+      params:
+        globs:
+        - om-linux
+    - get: stemcell-downloader
+      params:
+        globs: [stemcell-downloader-linux]
+
+  - task: wait-opsman-clear
+    file: pcf-pipelines/tasks/wait-opsman-clear/task.yml
+    params:
+      OPSMAN_USERNAME: {{$input.OpsMgr.Username}}
+      OPSMAN_PASSWORD: {{$input.OpsMgr.Password}}
+      OPSMAN_URI: {{$input.OpsMgr.Target}}
+
+  - task: upload-tile
+    file: pcf-pipelines/tasks/upload-product/task.yml
+    params:
+      OPSMAN_USERNAME: {{$input.OpsMgr.Username}}
+      OPSMAN_PASSWORD: {{$input.OpsMgr.Password}}
+      OPSMAN_URI: {{$input.OpsMgr.Target}}
+      PIVNET_PRODUCT_NAME: {{.ProductSlug}}
+  - task: stage-tile
+    file: pcf-pipelines/tasks/stage-product/task.yml
+    params:
+      OPSMAN_USERNAME: {{$input.OpsMgr.Username}}
+      OPSMAN_PASSWORD: {{$input.OpsMgr.Password}}
+      OPSMAN_URI: {{$input.OpsMgr.Target}}
+      PRODUCT_NAME: {{.Name}}
+  - task: upload-stemcell
+    file: pcf-pipelines/tasks/upload-stemcell/task.yml
+    params:
+      PRODUCT: {{.MetadataBasename}}
+
+      IAAS_TYPE: {{$input.OpsMgr.IAAS}}
+      OPSMAN_USERNAME: {{$input.OpsMgr.Username}}
+      OPSMAN_PASSWORD: {{$input.OpsMgr.Password}}
+      OPSMAN_URI: {{$input.OpsMgr.Target}}
+  - task: apply-changes
+    file: pcf-pipelines/tasks/apply-changes/task.yml
+    params:
+      OPSMAN_USERNAME: {{$input.OpsMgr.Username}}
+      OPSMAN_PASSWORD: {{$input.OpsMgr.Password}}
+      OPSMAN_URI: {{$input.OpsMgr.Target}}
+      OPSMAN_TIMEOUT: {{$input.OpsMgr.Timeout}}
+  {{end}}
+unpack_tarball_config: &unpack_tarball_config
+  config:
+    platform: linux
+    image_resource:
+      type: docker-image
+      source:
+        repository: cloudfoundry/cflinuxfs2
+    inputs:
+    - name: pcf-pipelines-tarball
+    outputs:
+    - name: pcf-pipelines
+    run:
+     path: sh
+     args: ["-c", "tar -xvf pcf-pipelines-tarball/*.tgz"]

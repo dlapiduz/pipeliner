@@ -1,0 +1,12 @@
+---
+poll_interval: 10m
+pivnet_token:
+github_token:
+ops_managers:
+- name: imo
+  username:
+  password:
+  target:
+  validate_ssl: false
+  timeout: 60
+  iaas_type: vsphere
